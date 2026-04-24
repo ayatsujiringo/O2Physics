@@ -1357,6 +1357,8 @@ class VarManager : public TObject
   static void FillGlobalMuonRefitCov(T1 const& muontrack, T2 const& mfttrack, const C& collision, C2 const& mftcov, float* values = nullptr);
   template <int pairType, uint32_t fillMap, typename T1, typename T2>
   static void FillPair(T1 const& t1, T2 const& t2, float* values = nullptr);
+  template <int pairType, uint32_t fillMap, typename T1, typename T2>        //xyhu_change
+  static void FillPairRotation(T1 const& t1, T2 const& t2, float* values = nullptr);
   template <int pairType, uint32_t fillMap, typename C, typename T1, typename T2>
   static void FillPairCollision(C const& collision, T1 const& t1, T2 const& t2, float* values = nullptr);
   template <int pairType, uint32_t fillMap, typename C, typename T1, typename T2, typename M, typename P>
@@ -3698,6 +3700,275 @@ void VarManager::FillPair(T1 const& t1, T2 const& t2, float* values)
     values[kPairPhiv] = calculatePhiV<pairType>(t1, t2);
   }
 }
+
+//xyhu_change_start: rotation pair
+template <int pairType, uint32_t fillMap, typename T1, typename T2>
+void VarManager::FillPairRotation(T1 const& t1, T2 const& t2, float* values)
+{
+  if (!values) {
+    values = fgValues;
+  }
+
+  float m1 = o2::constants::physics::MassElectron;
+  float m2 = o2::constants::physics::MassElectron;
+  if constexpr (pairType == kDecayToMuMu) {
+    m1 = o2::constants::physics::MassMuon;
+    m2 = o2::constants::physics::MassMuon;
+  }
+
+  if constexpr (pairType == kDecayToPiPi) {
+    m1 = o2::constants::physics::MassPionCharged;
+    m2 = o2::constants::physics::MassPionCharged;
+  }
+
+  if constexpr (pairType == kDecayToKPi) {
+    m1 = o2::constants::physics::MassKaonCharged;
+    m2 = o2::constants::physics::MassPionCharged;
+    // Make the TPC information of the kaon available for pair histograms
+    values[kPin_leg1] = t1.tpcInnerParam();
+    values[kTPCnSigmaKa_leg1] = t1.tpcNSigmaKa();
+  }
+
+  if constexpr (pairType == kElectronMuon) {
+    m2 = o2::constants::physics::MassMuon;
+  }
+
+  TRandom rand;
+  rand.SetSeed(0);
+  float dphi = rand.Uniform(0, 2*M_PI);
+  float rotationphi2 = t2.phi() + dphi;
+
+  if (rotationphi2 > 2*M_PI) rotationphi2 -= 2*M_PI;
+
+  values[kCharge] = t1.sign() + t2.sign();
+  values[kCharge1] = t1.sign();
+  values[kCharge2] = t2.sign();
+  ROOT::Math::PtEtaPhiMVector v1(t1.pt(), t1.eta(), t1.phi(), m1);
+  ROOT::Math::PtEtaPhiMVector v2(t2.pt(), t2.eta(), rotationphi2, m2);
+  ROOT::Math::PtEtaPhiMVector v12 = v1 + v2;
+  values[kMass] = v12.M();
+  values[kPt] = v12.Pt();
+  values[kEta] = v12.Eta();
+  // values[kPhi] = v12.Phi();
+  values[kPhi] = v12.Phi() > 0 ? v12.Phi() : v12.Phi() + 2. * M_PI;
+  values[kRap] = -v12.Rapidity();
+  double Ptot1 = TMath::Sqrt(v1.Px() * v1.Px() + v1.Py() * v1.Py() + v1.Pz() * v1.Pz());
+  double Ptot2 = TMath::Sqrt(v2.Px() * v2.Px() + v2.Py() * v2.Py() + v2.Pz() * v2.Pz());
+  values[kDeltaPtotTracks] = Ptot1 - Ptot2;
+
+  values[kPt1] = t1.pt();
+  values[kEta1] = t1.eta();
+  values[kPhi1] = t1.phi();
+  values[kPt2] = t2.pt();
+  values[kEta2] = t2.eta();
+  values[kPhi2] = rotationphi2;
+
+  if (fgUsedVars[kDeltaPhiPair2]) {
+    double phipair2 = v1.Phi() - v2.Phi();
+    if (phipair2 > 3 * TMath::Pi() / 2) {
+      values[kDeltaPhiPair2] = phipair2 - 2 * TMath::Pi();
+    } else if (phipair2 < -TMath::Pi() / 2) {
+      values[kDeltaPhiPair2] = phipair2 + 2 * TMath::Pi();
+    } else {
+      values[kDeltaPhiPair2] = phipair2;
+    }
+  }
+
+  if (fgUsedVars[kDeltaEtaPair2]) {
+    values[kDeltaEtaPair2] = v1.Eta() - v2.Eta();
+  }
+
+  if (fgUsedVars[kPsiPair]) {
+    values[kDeltaPhiPair] = (t1.sign() * fgMagField > 0.) ? (v1.Phi() - v2.Phi()) : (v2.Phi() - v1.Phi());
+    double xipair = TMath::ACos((v1.Px() * v2.Px() + v1.Py() * v2.Py() + v1.Pz() * v2.Pz()) / v1.P() / v2.P());
+    values[kPsiPair] = (t1.sign() * fgMagField > 0.) ? TMath::ASin((v1.Theta() - v2.Theta()) / xipair) : TMath::ASin((v2.Theta() - v1.Theta()) / xipair);
+  }
+
+  if (fgUsedVars[kOpeningAngle]) {
+    double scalar = v1.Px() * v2.Px() + v1.Py() * v2.Py() + v1.Pz() * v2.Pz();
+    double Ptot12 = Ptot1 * Ptot2;
+    if (Ptot12 <= 0) {
+      values[kOpeningAngle] = 0.;
+    } else {
+      double arg = scalar / Ptot12;
+      if (arg > 1.)
+        arg = 1.;
+      if (arg < -1)
+        arg = -1;
+      values[kOpeningAngle] = TMath::ACos(arg);
+    }
+  }
+
+  // polarization parameters
+  bool useHE = fgUsedVars[kCosThetaHE] || fgUsedVars[kPhiHE]; // helicity frame
+  bool useCS = fgUsedVars[kCosThetaCS] || fgUsedVars[kPhiCS]; // Collins-Soper frame
+  bool usePP = fgUsedVars[kCosThetaPP];                       // production plane frame
+  bool useRM = fgUsedVars[kCosThetaRM];                       // Random frame
+
+  if (useHE || useCS || usePP || useRM) {
+    ROOT::Math::Boost boostv12{v12.BoostToCM()};
+    ROOT::Math::XYZVectorF v1_CM{(boostv12(v1).Vect()).Unit()};
+    ROOT::Math::XYZVectorF v2_CM{(boostv12(v2).Vect()).Unit()};
+    ROOT::Math::XYZVectorF Beam1_CM{(boostv12(fgBeamA).Vect()).Unit()};
+    ROOT::Math::XYZVectorF Beam2_CM{(boostv12(fgBeamC).Vect()).Unit()};
+
+    // using positive sign convention for the first track
+    ROOT::Math::XYZVectorF v_CM = (t1.sign() > 0 ? v1_CM : v2_CM);
+
+    if (useHE) {
+      ROOT::Math::XYZVectorF zaxis_HE{(v12.Vect()).Unit()};
+      ROOT::Math::XYZVectorF yaxis_HE{(Beam1_CM.Cross(Beam2_CM)).Unit()};
+      ROOT::Math::XYZVectorF xaxis_HE{(yaxis_HE.Cross(zaxis_HE)).Unit()};
+      if (fgUsedVars[kCosThetaHE])
+        values[kCosThetaHE] = zaxis_HE.Dot(v_CM);
+      if (fgUsedVars[kPhiHE]) {
+        values[kPhiHE] = TMath::ATan2(yaxis_HE.Dot(v_CM), xaxis_HE.Dot(v_CM));
+        if (values[kPhiHE] < 0) {
+          values[kPhiHE] += 2 * TMath::Pi(); // ensure phi is in [0, 2pi]
+        }
+      }
+      if (fgUsedVars[kPhiTildeHE]) {
+        if (fgUsedVars[kCosThetaHE] && fgUsedVars[kPhiHE]) {
+          if (values[kCosThetaHE] > 0) {
+            values[kPhiTildeHE] = values[kPhiHE] - 0.25 * TMath::Pi(); // phi_tilde = phi - pi/4
+            if (values[kPhiTildeHE] < 0) {
+              values[kPhiTildeHE] += 2 * TMath::Pi(); // ensure phi_tilde is in [0, 2pi]
+            }
+          } else {
+            values[kPhiTildeHE] = values[kPhiHE] - 0.75 * TMath::Pi(); // phi_tilde = phi - 3pi/4
+            if (values[kPhiTildeHE] < 0) {
+              values[kPhiTildeHE] += 2 * TMath::Pi(); // ensure phi_tilde is in [0, 2pi]
+            }
+          }
+        } else {
+          values[kPhiTildeHE] = -999; // not computable
+        }
+      }
+    }
+
+    if (useCS) {
+      ROOT::Math::XYZVectorF zaxis_CS{(Beam1_CM - Beam2_CM).Unit()};
+      ROOT::Math::XYZVectorF yaxis_CS{(Beam1_CM.Cross(Beam2_CM)).Unit()};
+      ROOT::Math::XYZVectorF xaxis_CS{(yaxis_CS.Cross(zaxis_CS)).Unit()};
+      if (fgUsedVars[kCosThetaCS])
+        values[kCosThetaCS] = zaxis_CS.Dot(v_CM);
+      if (fgUsedVars[kPhiCS]) {
+        values[kPhiCS] = TMath::ATan2(yaxis_CS.Dot(v_CM), xaxis_CS.Dot(v_CM));
+        if (values[kPhiCS] < 0) {
+          values[kPhiCS] += 2 * TMath::Pi(); // ensure phi is in [0, 2pi]
+        }
+      }
+      if (fgUsedVars[kPhiTildeCS]) {
+        if (fgUsedVars[kCosThetaCS] && fgUsedVars[kPhiCS]) {
+          if (values[kCosThetaCS] > 0) {
+            values[kPhiTildeCS] = values[kPhiCS] - 0.25 * TMath::Pi(); // phi_tilde = phi - pi/4
+            if (values[kPhiTildeCS] < 0) {
+              values[kPhiTildeCS] += 2 * TMath::Pi(); // ensure phi_tilde is in [0, 2pi]
+            }
+          } else {
+            values[kPhiTildeCS] = values[kPhiCS] - 0.75 * TMath::Pi(); // phi_tilde = phi - 3pi/4
+            if (values[kPhiTildeCS] < 0) {
+              values[kPhiTildeCS] += 2 * TMath::Pi(); // ensure phi_tilde is in [0, 2pi]
+            }
+          }
+        } else {
+          values[kPhiTildeCS] = -999; // not computable
+        }
+      }
+    }
+
+    if (usePP) {
+      ROOT::Math::XYZVector zaxis_PP = ROOT::Math::XYZVector(v12.Py(), -v12.Px(), 0.f);
+      ROOT::Math::XYZVector yaxis_PP{(v12.Vect()).Unit()};
+      ROOT::Math::XYZVector xaxis_PP{(yaxis_PP.Cross(zaxis_PP)).Unit()};
+      if (fgUsedVars[kCosThetaPP]) {
+        values[kCosThetaPP] = zaxis_PP.Dot(v_CM) / std::sqrt(zaxis_PP.Mag2());
+      }
+      if (fgUsedVars[kPhiPP]) {
+        values[kPhiPP] = TMath::ATan2(yaxis_PP.Dot(v_CM), xaxis_PP.Dot(v_CM));
+        if (values[kPhiPP] < 0) {
+          values[kPhiPP] += 2 * TMath::Pi(); // ensure phi is in [0, 2pi]
+        }
+      }
+      if (fgUsedVars[kPhiTildePP]) {
+        if (fgUsedVars[kCosThetaPP] && fgUsedVars[kPhiPP]) {
+          if (values[kCosThetaPP] > 0) {
+            values[kPhiTildePP] = values[kPhiPP] - 0.25 * TMath::Pi(); // phi_tilde = phi - pi/4
+            if (values[kPhiTildePP] < 0) {
+              values[kPhiTildePP] += 2 * TMath::Pi(); // ensure phi_tilde is in [0, 2pi]
+            }
+          } else {
+            values[kPhiTildePP] = values[kPhiPP] - 0.75 * TMath::Pi(); // phi_tilde = phi - 3pi/4
+            if (values[kPhiTildePP] < 0) {
+              values[kPhiTildePP] += 2 * TMath::Pi(); // ensure phi_tilde is in [0, 2pi]
+            }
+          }
+        } else {
+          values[kPhiTildePP] = -999; // not computable
+        }
+      }
+    }
+
+    if (useRM) {
+      double randomCostheta = gRandom->Uniform(-1., 1.);
+      double randomPhi = gRandom->Uniform(0., 2. * TMath::Pi());
+      ROOT::Math::XYZVectorF zaxis_RM(randomCostheta, std::sqrt(1 - randomCostheta * randomCostheta) * std::cos(randomPhi), std::sqrt(1 - randomCostheta * randomCostheta) * std::sin(randomPhi));
+      if (fgUsedVars[kCosThetaRM])
+        values[kCosThetaRM] = zaxis_RM.Dot(v_CM);
+    }
+  }
+
+  if constexpr ((pairType == kDecayToEE) && ((fillMap & TrackCov) > 0 || (fillMap & ReducedTrackBarrelCov) > 0)) {
+
+    if (fgUsedVars[kQuadDCAabsXY] || fgUsedVars[kQuadDCAsigXY] || fgUsedVars[kQuadDCAabsZ] || fgUsedVars[kQuadDCAsigZ] || fgUsedVars[kQuadDCAsigXYZ] || fgUsedVars[kSignQuadDCAsigXY]) {
+      // Quantities based on the barrel tables
+      double dca1XY = t1.dcaXY();
+      double dca2XY = t2.dcaXY();
+      double dca1Z = t1.dcaZ();
+      double dca2Z = t2.dcaZ();
+      double dca1sigXY = dca1XY / std::sqrt(t1.cYY());
+      double dca2sigXY = dca2XY / std::sqrt(t2.cYY());
+      double dca1sigZ = dca1Z / std::sqrt(t1.cZZ());
+      double dca2sigZ = dca2Z / std::sqrt(t2.cZZ());
+
+      values[kQuadDCAabsXY] = std::sqrt((dca1XY * dca1XY + dca2XY * dca2XY) / 2);
+      values[kQuadDCAsigXY] = std::sqrt((dca1sigXY * dca1sigXY + dca2sigXY * dca2sigXY) / 2);
+      values[kQuadDCAabsZ] = std::sqrt((dca1Z * dca1Z + dca2Z * dca2Z) / 2);
+      values[kQuadDCAsigZ] = std::sqrt((dca1sigZ * dca1sigZ + dca2sigZ * dca2sigZ) / 2);
+      values[kSignQuadDCAsigXY] = t1.sign() * t2.sign() * TMath::Sign(1., dca1sigXY) * TMath::Sign(1., dca2sigXY) * std::sqrt((dca1sigXY * dca1sigXY + dca2sigXY * dca2sigXY) / 2);
+
+      double det1 = t1.cYY() * t1.cZZ() - t1.cZY() * t1.cZY();
+      double det2 = t2.cYY() * t2.cZZ() - t2.cZY() * t2.cZY();
+      if ((det1 < 0) || (det2 < 0)) {
+        values[kQuadDCAsigXYZ] = -999;
+      } else {
+        double chi2t1 = (dca1XY * dca1XY * t1.cZZ() + dca1Z * dca1Z * t1.cYY() - 2. * dca1XY * dca1Z * t1.cZY()) / det1;
+        double chi2t2 = (dca2XY * dca2XY * t2.cZZ() + dca2Z * dca2Z * t2.cYY() - 2. * dca2XY * dca2Z * t2.cZY()) / det2;
+
+        double dca1sigXYZ = std::sqrt(std::abs(chi2t1) / 2.);
+        double dca2sigXYZ = std::sqrt(std::abs(chi2t2) / 2.);
+
+        values[kQuadDCAsigXYZ] = std::sqrt((dca1sigXYZ * dca1sigXYZ + dca2sigXYZ * dca2sigXYZ) / 2);
+      }
+    }
+  }
+  if constexpr ((pairType == kDecayToMuMu) && ((fillMap & Muon) > 0 || (fillMap & ReducedMuon) > 0)) {
+    if (fgUsedVars[kQuadDCAabsXY]) {
+      double dca1X = t1.fwdDcaX();
+      double dca1Y = t1.fwdDcaY();
+      double dca1XY = std::sqrt(dca1X * dca1X + dca1Y * dca1Y);
+      double dca2X = t2.fwdDcaX();
+      double dca2Y = t2.fwdDcaY();
+      double dca2XY = std::sqrt(dca2X * dca2X + dca2Y * dca2Y);
+      values[kQuadDCAabsXY] = std::sqrt((dca1XY * dca1XY + dca2XY * dca2XY) / 2.);
+    }
+  }
+  if (fgUsedVars[kPairPhiv]) {
+    values[kPairPhiv] = calculatePhiV<pairType>(t1, t2);
+  }
+}
+
+//xyhu_change_end
 
 template <int pairType, uint32_t fillMap, typename C, typename T1, typename T2>
 void VarManager::FillPairCollision(const C& collision, T1 const& t1, T2 const& t2, float* values)
